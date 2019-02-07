@@ -1,0 +1,284 @@
+% Find optimal lambda for sparse dictionary mode and dataSet
+function calcOptLambda(dataSet,dictType,dictSize,sampleSize,mode,modeD)
+% function calcOptLambda(dataSet,dictType,dictSize,sampleSize,mode,modeD)
+% dataSet : prefer VOC2006
+% dictType : universal
+% dictSize : 1000
+% sampleSize : 200000
+% mode : [0,1,2,3,4,5]
+% modeD : [0,1,2]
+% compute dictionary for different values of lambda and coefficients and
+% subsequent classification performance.
+
+rootDir = '/vol/vssp/diplecs/ash/Data/';
+sampleDir = '/collated/';
+dictDir = '/Dictionary/';
+
+% initialize matlab
+cdir = pwd;
+cd ~;
+startup;
+cd (cdir);
+
+SpamsMatlabPath = '/vol/vssp/diplecs/ash/Code/spams-matlab/';
+cd (SpamsMatlabPath);
+start_spams
+
+
+sampleDataFile = [(rootDir),(dataSet),(sampleDir),(dataSet),num2str(sampleSize),'.uni'];
+% load the sample data file
+sampleData = load(sampleDataFile);
+fprintf('%s\n',sampleDataFile);
+
+% grid search value of lambda based on dictionary learning mode
+% if ismember(mode,[0,1,2,4,5])
+%     lambda = power(10,-3:1:4);
+% elseif mode == 3
+%     lambda = 0.2:0.1:0.9;
+% end
+lambda = power(10,-3:1:4);
+for iLambda = 1 : max(size(lambda))
+    
+    dictDataFile = [(rootDir),(dataSet),(dictDir),(dataSet),num2str(dictSize),(dictType),'dl','mode',num2str(mode),'modeD',num2str(modeD),'lambda',num2str(lambda(iLambda)),'.dict'];
+    callDictLambda(dictDataFile,sampleData,dataSet,dictSize,mode,modeD,lambda(iLambda))
+    callOMPCoeffNClassify(dictDataFile,dataSet,dictSize,mode,modeD,lambda(iLambda)); 
+end
+
+end
+
+function callDictLambda(dictDataFile,sampleData,dataSet,dictSize,mode,modeD,lambda)
+    if exist(dictDataFile,'file')
+        return;
+    end
+    param.mode = mode;
+    param.modeD = modeD;
+    param.lambda = lambda;
+    param.K = dictSize;
+    param.iter = -7200;
+    param.batchsize = 1000;
+    param.posAlpha = false;
+    param.posD = false;
+    param.iter_updateD = 1;
+    param.modeParam = 2;
+    param.verbose = true;
+    param.numThreads = -1;
+    fprintf('computing %s\t%d\t%d\n',dataSet,lambda);
+    [D] = mexTrainDL(sampleData,param);  
+    % write the dictionary to file
+    dlmwrite(dictDataFile,D,'delimiter',',');
+    fprintf('written %s\n',dictDataFile);
+end
+
+function callOMPCoeffNClassify(dictDataFile,dataSet,dictSize,mode,modeD,lambda)
+rootDir = '/vol/vssp/diplecs/ash/Data/';
+imageListDir = '/ImageLists/';
+coeffDir = '/Coeff/';
+categoryListFileName = 'categoryList.txt';
+% read the category list in the dataset
+categoryListPath = [(rootDir),(dataSet),'/',(categoryListFileName)];
+fid = fopen(categoryListPath,'r');
+categoryList = textscan(fid,'%s');
+categoryList = categoryList{1};
+fclose(fid);
+%
+nCategory = size(categoryList,1);
+listSizes = 30;
+nListSizes = max(size(listSizes));
+lambdaDir = '/lambda/';
+lambdaPerFileAvg = [(rootDir),(dataSet),(lambdaDir),'mode',num2str(mode),'modeD',num2str(modeD),'lambda',num2str(lambda),'.avg'];
+lambdaPerFileMax = [(rootDir),(dataSet),(lambdaDir),'mode',num2str(mode),'modeD',num2str(modeD),'lambda',num2str(lambda),'.max'];
+lambdaAvg = zeros(nCategory,3);
+lambdaMax = zeros(nCategory,3);
+
+for iCategory = 1 : nCategory
+    % load the images from imagelist
+    dict = load(dictDataFile);
+    if ~ismember(dataSet,['VOC2006','VOC2007','VOC2010'])
+        coeffCatDir = [(rootDir),(dataSet),(coeffDir),categoryList{iCategory},'/'];
+        if ~exist(coeffCatDir,'dir')
+            mkdir(coeffCatDir)
+        end
+    end
+    
+    for iListSize = 1 : nListSizes
+        listTrainPosFile = [(rootDir),(dataSet),(imageListDir),categoryList{iCategory},'Train',num2str(listSizes(iListSize)),'.pos'];
+        listValPosFile = [(rootDir),(dataSet),(imageListDir),categoryList{iCategory},'Val',num2str(listSizes(iListSize)),'.pos'];
+        listTrainNegFile = [(rootDir),(dataSet),(imageListDir),categoryList{iCategory},'Train',num2str(listSizes(iListSize)),'.neg'];
+        listValNegFile = [(rootDir),(dataSet),(imageListDir),categoryList{iCategory},'Val',num2str(listSizes(iListSize)),'.neg'];
+        
+        fid = fopen(listTrainPosFile,'r');
+        listTrainPos = textscan(fid,'%s');
+        fclose(fid);
+        listTrainPos = listTrainPos{1};
+        
+        fid = fopen(listValPosFile,'r');
+        listValPos = textscan(fid,'%s');
+        fclose(fid);
+        listValPos = listValPos{1};
+        
+        fid = fopen(listTrainNegFile,'r');
+        listTrainNeg = textscan(fid,'%s');
+        fclose(fid);
+        listTrainNeg = listTrainNeg{1};
+        
+        fid = fopen(listValNegFile,'r');
+        listValNeg = textscan(fid,'%s');
+        fclose(fid);
+        listValNeg = listValNeg{1};
+        
+        nListTrainPos = size(listTrainPos,1);
+        nListValPos = size(listValPos,1);
+        nListTrainNeg = size(listTrainNeg,1);
+        nListValNeg = size(listValNeg,1);
+        
+        FTrainPosAvg = [];
+        FTrainNegAvg = [];
+        FValPosAvg = [];
+        FValNegAvg = [];
+
+        FTrainPosMax = [];
+        FTrainNegMax = [];
+        FValPosMax = [];
+        FValNegMax = [];
+        
+        % Train ; Pos
+        for iter = 1 : nListTrainPos
+            imageName = listTrainPos{iter};
+            [Favg, Fmax] = callOMPnClassify(imageName,dict,dataSet,dictSize,mode,modeD,lambda);
+            
+            if size(Favg,1) > size(Favg,2)
+                Favg = Favg';
+            end
+            if size(Fmax,1) > size(Fmax,2)
+                Fmax = Fmax';
+            end
+            Favg = [Favg,1];
+            Fmax = [Fmax,1];
+            FTrainPosAvg = [FTrainPosAvg;Favg];
+            FTrainPosMax = [FTrainPosMax;Fmax];
+        end
+        
+        % Val ; Pos
+        for iter = 1 : nListValPos
+            imageName = listValPos{iter};
+            [Favg, Fmax] = callOMPnClassify(imageName,dict,dataSet,dictSize,mode,modeD,lambda);
+            if size(Favg,1) > size(Favg,2)
+                Favg = Favg';
+            end
+            if size(Fmax,1) > size(Fmax,2)
+                Fmax = Fmax';
+            end
+            Favg = [Favg,1];
+            Fmax = [Fmax,1];
+            FValPosAvg = [FValPosAvg;Favg];
+            FValPosMax = [FValPosMax;Fmax];
+        end
+        
+        % Train ; Neg
+        for iter = 1 : nListTrainNeg
+            imageName = listTrainNeg{iter};
+            [Favg, Fmax] = callOMPnClassify(imageName,dict,dataSet,dictSize,mode,modeD,lambda);
+            if size(Favg,1) > size(Favg,2)
+                Favg = Favg';
+            end
+            if size(Fmax,1) > size(Fmax,2)
+                Fmax = Fmax';
+            end
+            Favg = [Favg,0];
+            Fmax = [Fmax,0];
+            FTrainNegAvg = [FTrainNegAvg;Favg];
+            FTrainNegMax = [FTrainNegMax;Fmax];
+        end
+        
+        % Val ; Neg
+        for iter = 1 : nListValNeg
+            imageName = listValNeg{iter};
+           [Favg, Fmax] = callOMPnClassify(imageName,dict,dataSet,dictSize,mode,modeD,lambda);
+            if size(Favg,1) > size(Favg,2)
+                Favg = Favg';
+            end
+            if size(Fmax,1) > size(Fmax,2)
+                Fmax = Fmax';
+            end
+            Favg = [Favg,0];
+            Fmax = [Fmax,0];
+            FValNegAvg = [FValNegAvg;Favg];
+            FValNegMax = [FValNegMax;Fmax];
+        end
+    end
+    
+    FTrainAvg = [FTrainPosAvg;FTrainNegAvg];
+    FValAvg = [FValPosAvg;FValNegAvg];
+    
+    FTrainMax = [FTrainPosMax;FTrainNegMax];
+    FValMax = [FValPosMax;FValNegMax];
+
+    %---------------------------------------------------------------------
+    % CLASSIFICATION
+    %---------------------------------------------------------------------
+    % echo pipeline stage: classification
+    fprintf('%s\n','classification');
+
+    cdir = pwd;
+    cd '/vol/vssp/diplecs/ash/code/libsvm-3.11/matlab/';
+    % train the classifier
+    svmStruct = svmtrain(FTrainAvg(:,dictSize+1),FTrainAvg(:,1:dictSize), '-h 0');
+    % predict label of data using the trained classifier
+    [predLabel, svmacc, predValues] = svmpredict(FValAvg(:,dictSize+1), FValAvg(:,1:dictSize), svmStruct);
+    cd (cdir);
+
+    [recall, precision, th, averagePrecision] = precisionRecall(predValues, FValAvg(:,dictSize+1), 'r');
+    [faRate, hitRate, AUC] = ROCcurve(predValues, FValAvg(:,dictSize+1));
+    cp = classperf(FValAvg(:,dictSize+1),predLabel);
+    fprintf('%s\t%f\t%f\n',categoryList{iCategory},averagePrecision,AUC);
+    
+    lambdaAvg(iCategory,1) = averagePrecision;
+    lambdaAvg(iCategory,2) = AUC;
+    lambdaAvg(iCategory,3) = cp.CorrectRate;
+    
+    % ----------------------------------------------------------------------
+    cdir = pwd;
+    cd '/vol/vssp/diplecs/ash/code/libsvm-3.11/matlab/';
+    % train the classifier
+    svmStruct = svmtrain(FTrainMax(:,dictSize+1),FTrainMax(:,1:dictSize), '-h 0');
+    % predict label of data using the trained classifier
+    [predLabel, svmacc, predValues] = svmpredict(FValMax(:,dictSize+1), FValMax(:,1:dictSize), svmStruct);
+    cd (cdir);
+
+    [recall, precision, th, averagePrecision] = precisionRecall(predValues, FValMax(:,dictSize+1), 'r');
+    [faRate, hitRate, AUC] = ROCcurve(predValues, FValMax(:,dictSize+1));
+    cp = classperf(FValMax(:,dictSize+1),predLabel);
+    fprintf('%s\t%f\t%f\n',categoryList{iCategory},averagePrecision,AUC);
+    
+    lambdaMax(iCategory,1) = averagePrecision;
+    lambdaMax(iCategory,2) = AUC;
+    lambdaMax(iCategory,3) = cp.CorrectRate;
+    
+    
+end % end for category loop
+
+% write the performance for each lambda to file
+dlmwrite(lambdaPerFileAvg,lambdaAvg,'delimiter',',');
+dlmwrite(lambdaPerFileMax,lambdaMax,'delimiter',',');
+
+end % end calcOpt func call
+
+function [Favg,Fmax] = callOMPnClassify(imageName,dict,dataSet,dictSize,mode,modeD,lambda)
+    rootDir = '/vol/vssp/diplecs/ash/Data/';
+    dsiftDir = '/DSIFT/';
+    imageFilePath = [(rootDir),(dataSet),(dsiftDir),(imageName),'.dsift'];
+    imageData = load(imageFilePath);
+    imageData = imageData(3:130,:);    
+    nNonZero = ceil(0.8*dictSize); % 20 percent 0 coeffs    
+    params.L = nNonZero;
+    params.numThreads = -1;
+    tic;
+    alpha = mexOMP(imageData,dict,params);
+    coeff = full(alpha);
+    t = toc;
+    fprintf('%f\n',t);
+    Favg = mean(coeff,2);
+    Fmax = max(coeff,[],2);
+    
+    return;
+end
